@@ -11,7 +11,7 @@ Drop-in deployment:
   Build:  pip install -r requirements.txt
   Start:  uvicorn nim_proxy:app --host 0.0.0.0 --port $PORT
   Env:    NIM_PROXY_API_KEY=<random-hex>     (optional, see auth below)
-          NIM_UPSTREAM=https://integrate.api.nvidia.com/v1   (default)
+          NIM_UPSTREAM=https://integrate.api.nvidia.com   (no trailing /v1)
 """
 
 import os
@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
+from urllib.parse import urlparse
 
 # --- Config ---
 NVIDIA_BASE_URL = os.environ.get(
@@ -114,10 +115,15 @@ async def proxy(path: str, request: Request):
 
     body = await request.body()
 
+    # Forward headers, but strip hop-by-hop ones
     fwd_headers = {
         k: v for k, v in request.headers.items()
         if k.lower() not in HOP_BY_HOP
     }
+    # CRITICAL: Override Host header to match the upstream API.
+    # Without this, Cloudflare rejects with 403 Forbidden.
+    upstream_host = urlparse(NVIDIA_BASE_URL).hostname
+    fwd_headers["host"] = upstream_host
 
     ua = request.headers.get("user-agent", "-")[:50]
     log.info(f"[NIM] {request.method} {path}  body={len(body)}B  ua={ua}")
@@ -158,4 +164,4 @@ async def proxy(path: str, request: Request):
         status_code=upstream_resp.status_code,
         headers=resp_headers,
         media_type=upstream_resp.headers.get("content-type", "application/json"),
-  )
+    )
