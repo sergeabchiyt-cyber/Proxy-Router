@@ -1,5 +1,6 @@
 """
-nim_proxy.py — transparent reverse proxy for NVIDIA NIM with forced Host header.
+nim_proxy.py — transparent reverse proxy for NVIDIA NIM.
+Forces correct Host header and logs all requests.
 """
 
 import os
@@ -16,7 +17,10 @@ NVIDIA_BASE_URL = os.environ.get("NIM_UPSTREAM", "https://integrate.api.nvidia.c
 PROXY_API_KEY = os.environ.get("NIM_PROXY_API_KEY", "").strip()
 TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=60.0, pool=10.0)
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 log = logging.getLogger("nim-proxy")
 
 HOP_BY_HOP = frozenset({
@@ -32,7 +36,13 @@ async def lifespan(app: FastAPI):
     await client.aclose()
 
 app = FastAPI(title="NIM Proxy", version="1.0.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"], allow_credentials=False)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    allow_credentials=False,
+)
 
 client = httpx.AsyncClient(timeout=TIMEOUT, http2=False, follow_redirects=False)
 
@@ -46,7 +56,12 @@ def authorized(request: Request) -> bool:
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "nim-proxy", "upstream": NVIDIA_BASE_URL, "auth": "required" if PROXY_API_KEY else "bearer-only"}
+    return {
+        "status": "ok",
+        "service": "nim-proxy",
+        "upstream": NVIDIA_BASE_URL,
+        "auth": "required" if PROXY_API_KEY else "bearer-only",
+    }
 
 @app.get("/")
 async def root():
@@ -58,7 +73,11 @@ async def proxy(path: str, request: Request):
         return JSONResponse({}, status_code=204)
 
     if not authorized(request):
-        return JSONResponse({"status": 401, "title": "Unauthorized", "detail": "Provide X-API-Key or a Bearer token"}, status_code=401)
+        return JSONResponse(
+            {"status": 401, "title": "Unauthorized",
+             "detail": "Provide X-API-Key or a Bearer token"},
+            status_code=401,
+        )
 
     target = f"{NVIDIA_BASE_URL}/{path}"
     if request.url.query:
@@ -66,32 +85,44 @@ async def proxy(path: str, request: Request):
 
     body = await request.body()
 
-    # Build forwarding headers, stripping hop-by-hop
-    fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP_BY_HOP}
-    
-    # CRITICAL: Force correct Host header for upstream
+    # Forward headers, strip hop-by-hop
+    fwd_headers = {
+        k: v for k, v in request.headers.items()
+        if k.lower() not in HOP_BY_HOP
+    }
+
+    # CRITICAL: Override Host header to match upstream
     upstream_host = urlparse(NVIDIA_BASE_URL).hostname
     fwd_headers["host"] = upstream_host
 
     # Debug logging
-    log.info(f"REQUEST: {request.method} {path} -> {target}")
-    log.info(f" Outgoing Host: {fwd_headers.get('host')}")
+    log.info(f"=== Request: {request.method} {path} ===")
+    log.info(f"  Target URL: {target}")
+    log.info(f"  Outgoing Host: {fwd_headers.get('host')}")
     auth_val = fwd_headers.get("authorization", "")
     if auth_val:
-        log.info(f" Authorization: {auth_val[:30]}...")
+        log.info(f"  Authorization: {auth_val[:40]}...")
     else:
-        log.warning(" No Authorization header found!")
+        log.warning("  No Authorization header!")
+    log.info(f"  User-Agent: {request.headers.get('user-agent', '-')[:50]}")
 
-    ua = request.headers.get("user-agent", "-")[:50]
-    log.info(f" User-Agent: {ua}")
-
-    upstream_req = client.build_request(method=request.method, url=target, headers=fwd_headers, content=body)
+    upstream_req = client.build_request(
+        method=request.method,
+        url=target,
+        headers=fwd_headers,
+        content=body,
+    )
 
     try:
         upstream_resp = await client.send(upstream_req, stream=True)
+        log.info(f"  Upstream status: {upstream_resp.status_code}")
     except httpx.RequestError as e:
-        log.error(f"Upstream connect failed: {e}")
-        return JSONResponse({"status": 502, "title": "Bad Gateway", "detail": f"upstream error: {e}"}, status_code=502)
+        log.error(f"  Upstream error: {e}")
+        return JSONResponse(
+            {"status": 502, "title": "Bad Gateway",
+             "detail": f"upstream error: {e}"},
+            status_code=502,
+        )
 
     async def relay():
         try:
@@ -100,5 +131,14 @@ async def proxy(path: str, request: Request):
         finally:
             await upstream_resp.aclose()
 
-    resp_headers = {k: v for k, v in upstream_resp.headers.items() if k.lower() not in (HOP_BY_HOP | {"content-type"})}
-    return StreamingResponse(relay(), status_code=upstream_resp.status_code, headers=resp_headers, media_type=upstream_resp.headers.get("content-type", "application/json"))
+    resp_headers = {
+        k: v for k, v in upstream_resp.headers.items()
+        if k.lower() not in (HOP_BY_HOP | {"content-type"})
+    }
+
+    return StreamingResponse(
+        relay(),
+        status_code=upstream_resp.status_code,
+        headers=resp_headers,
+        media_type=upstream_resp.headers.get("content-type", "application/json"),
+    )
