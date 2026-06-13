@@ -24,7 +24,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 
 # --- Config ---
 NVIDIA_BASE_URL = os.environ.get(
-    "NIM_UPSTREAM", "https://integrate.api.nvidia.com/v1"
+    "NIM_UPSTREAM", "https://integrate.api.nvidia.com"
 ).rstrip("/")
 PROXY_API_KEY = os.environ.get("NIM_PROXY_API_KEY", "").strip()
 TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=60.0, pool=10.0)
